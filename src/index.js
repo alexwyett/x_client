@@ -7,6 +7,7 @@ module.exports = {
     GetProfile: require('./getProfileData'),
     CreatePost: require('./createTweet'),
     UploadMedia: require('./uploadMedia'),
+    Search: require('./searchTweets'),
   },
   Utils: {
     Client: {
