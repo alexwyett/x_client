@@ -84,6 +84,10 @@ class Twitter {
     this.config = config;
   }
 
+  setSubdomain(api, version = '1.1') {
+    this.url = getUrl(api, version);
+  }
+
   isEndpoint1OrEndpoint2(resource) {
     const endpoint2 = JSON_ENDPOINTS2.includes(resource);
     const endpoint1 = JSON_ENDPOINTS1.includes(resource) || resource.startsWith('users/');

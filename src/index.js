@@ -4,7 +4,9 @@ module.exports = {
     GetPostsById: require('./getTweetsById'),
     GetUsers: require('./getUsers'),
     GetPostInteractions: require('./getUserTweetInteractions'),
-    GetProfile: require('./getProfileData')
+    GetProfile: require('./getProfileData'),
+    CreatePost: require('./createTweet'),
+    UploadMedia: require('./uploadMedia'),
   },
   Utils: {
     Client: {
