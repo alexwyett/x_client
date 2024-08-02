@@ -1,0 +1,457 @@
+const crypto = require('crypto');
+const OAuth = require('oauth-1.0a');
+const Fetch = require('cross-fetch');
+const querystring = require('querystring');
+const oauthSignature = require('oauth-signature');
+const getRandomValues = require('get-random-values');
+
+const getUrl = (subdomain, endpoint = '1.1') => `https://${subdomain}.twitter.com/${endpoint}`;
+
+const createOauthClient = ({ key, secret }) => {
+  const client = OAuth({
+    consumer: { key, secret },
+    signature_method: 'HMAC-SHA1',
+    hash_function(baseString, key) {
+      return crypto
+        .createHmac('sha1', key)
+        .update(baseString)
+        .digest('base64');
+    },
+  });
+  return client;
+};
+
+const defaults = {
+  subdomain: 'api',
+  consumer_key: null,
+  consumer_secret: null,
+  access_token_key: null,
+  access_token_secret: null,
+  bearer_token: null,
+  version: '1.1',
+  extension: true,
+};
+
+// Twitter expects POST body parameters to be URL-encoded: https://developer.twitter.com/en/docs/basics/authentication/guides/creating-a-signature
+// However, some endpoints expect a JSON payload - https://developer.twitter.com/en/docs/direct-messages/sending-and-receiving/api-reference/new-event
+// It appears that JSON payloads don't need to be included in the signature,
+// because sending DMs works without signing the POST body
+const JSON_ENDPOINTS1 = [
+  'direct_messages/events/new',
+  'direct_messages/welcome_messages/new',
+  'direct_messages/welcome_messages/rules/new',
+  'media/metadata/create',
+  'collections/entries/curate',
+  'tweets',
+  'users/'
+];
+
+const JSON_ENDPOINTS2 = [
+  'media/upload',
+];
+
+const baseHeaders = {
+  'Content-Type': 'application/json',
+  Accept: 'application/json',
+};
+
+function percentEncode(string) {
+  // From OAuth.prototype.percentEncode
+  return string
+    .replace(/!/g, '%21')
+    .replace(/\*/g, '%2A')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29');
+}
+
+class Twitter {
+  constructor(options) {
+    const config = Object.assign({}, defaults, options);
+    this.authType = config.bearer_token ? 'App' : 'User';
+    this.client = createOauthClient({
+      key: config.consumer_key,
+      secret: config.consumer_secret,
+    });
+
+    this.token = {
+      key: config.access_token_key,
+      secret: config.access_token_secret,
+    };
+
+    this.url = getUrl(config.subdomain, config.version);
+    this.oauth = getUrl(config.subdomain, 'oauth');
+    this.config = config;
+  }
+
+  isEndpoint1OrEndpoint2(resource) {
+    const endpoint2 = JSON_ENDPOINTS2.includes(resource);
+    const endpoint1 = JSON_ENDPOINTS1.includes(resource) || resource.startsWith('users/');
+    if (endpoint2) {
+      return 'v2';
+    } else if (endpoint1) {
+      return 'v1'
+    };
+  }
+
+  /**
+   * Parse the JSON from a Response object and add the Headers under `_headers`
+   * @param {Response} response - the Response object returned by Fetch
+   * @return {Promise<object>}
+   * @private
+   */
+  static async _handleResponse(response) {
+    const headers = response.headers; // TODO: see #44
+    if (response.ok) {
+      // Return empty response on 204 "No content", or Content-Length=0
+      if (response.status === 204 || response.headers.get('content-length') === '0')
+        return {
+          _headers: headers,
+        };
+      // Otherwise, parse JSON response
+      return response.json().then(res => {
+        res._headers = headers; // TODO: this creates an array-like object when it adds _headers to an array response
+        return res;
+      });
+    } else {
+      throw {
+        _headers: headers,
+        ...await response.json(),
+      };
+    }
+  }
+
+  /**
+   * Resolve the TEXT parsed from the successful response or reject the JSON from the error
+   * @param {Response} response - the Response object returned by Fetch
+   * @return {Promise<object>}
+   * @throws {Promise<object>}
+   * @private
+   */
+  static async _handleResponseTextOrJson(response) {
+    let body = await response.text();
+    if (response.ok) {
+      return querystring.parse(body);
+    } else {
+      let error;
+      try {
+        // convert to object if it is a json
+        error = JSON.parse(body);
+      } catch (e) {
+        // it is not a json
+        error = body;
+      }
+      return Promise.reject(error);
+    }
+  }
+
+  async getBearerToken() {
+    const headers = {
+      Authorization:
+        'Basic ' +
+        Buffer.from(
+          this.config.consumer_key + ':' + this.config.consumer_secret,
+        ).toString('base64'),
+      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+    };
+
+    const results = await Fetch('https://api.twitter.com/oauth2/token', {
+      method: 'POST',
+      body: 'grant_type=client_credentials',
+      headers,
+    }).then(Twitter._handleResponse);
+
+    return results;
+  }
+
+  async getRequestToken(twitterCallbackUrl) {
+    const requestData = {
+      url: `${this.oauth}/request_token`,
+      method: 'POST',
+    };
+
+    let parameters = {};
+    if (twitterCallbackUrl) parameters = { oauth_callback: twitterCallbackUrl };
+    if (parameters) requestData.url += '?' + querystring.stringify(parameters);
+
+    const headers = this.client.toHeader(
+      this.client.authorize(requestData, {}),
+    );
+
+    const results = await Fetch(requestData.url, {
+      method: 'POST',
+      headers: Object.assign({}, baseHeaders, headers),
+    })
+      .then(Twitter._handleResponseTextOrJson);
+
+    return results;
+  }
+
+  async getAccessToken(options) {
+    const requestData = {
+      url: `${this.oauth}/access_token`,
+      method: 'POST',
+    };
+
+    let parameters = { oauth_verifier: options.oauth_verifier, oauth_token: options.oauth_token };
+    if (parameters.oauth_verifier && parameters.oauth_token) requestData.url += '?' + querystring.stringify(parameters);
+
+    const headers = this.client.toHeader( this.client.authorize(requestData) );
+
+    const results = await Fetch(requestData.url, {
+      method: 'POST',
+      headers: Object.assign({}, baseHeaders, headers),
+    })
+      .then(Twitter._handleResponseTextOrJson);
+
+    return results;
+  }
+
+  /**
+   * Construct the data and headers for an authenticated HTTP request to the Twitter API
+   * @param {string} method - 'GET' or 'POST'
+   * @param {string} resource - the API endpoint
+   * @param {object} parameters
+   * @return {{requestData: {url: string, method: string}, headers: ({Authorization: string}|OAuth.Header)}}
+   * @private
+   */
+  _makeRequest(method, resource, parameters) {
+    const requestData = {
+      url: `${this.url}/${resource}${this.config.extension ? '.json' : ''}`,
+      method,
+    };
+    if (parameters)
+      if (method === 'POST') requestData.data = parameters;
+      else requestData.url += '?' + querystring.stringify(parameters);
+
+    let headers = {};
+    if (this.authType === 'User') {
+      headers = this.client.toHeader(
+        this.client.authorize(requestData, this.token),
+      );
+    } else {
+      headers = {
+        Authorization: `Bearer ${this.config.bearer_token}`,
+      };
+    }
+    return {
+      requestData,
+      headers,
+    };
+  }
+
+  /**
+   * Send a GET request
+   * @param {string} resource - endpoint, e.g. `followers/ids`
+   * @param {object} [parameters] - optional parameters
+   * @returns {Promise<object>} Promise resolving to the response from the Twitter API.
+   *   The `_header` property will be set to the Response headers (useful for checking rate limits)
+   */
+  get(resource, parameters) {
+    const { requestData, headers } = this._makeRequest(
+      'GET',
+      resource,
+      parameters,
+    );
+
+    return Fetch(requestData.url, { headers })
+      .then(Twitter._handleResponse);
+  }
+
+  /**
+   * Create oauth signature
+   * @param {httpMethod} get || post || put || delete.
+   * @param {parameters} body - parameters object.
+   * @param {consumerSecret} consumerSecret.
+   * @param {tokenSecret} tokenSecret.
+   * @returns {<object>} Returns encodedSignature & signature
+   */
+  createOauthSignature(httpMethod, url, parameters, consumerSecret, tokenSecret) {
+    const params = {
+      httpMethod,
+      url,
+      parameters,
+      consumerSecret,
+      tokenSecret,
+    };
+    // generates a RFC 3986 encoded, BASE64 encoded HMAC-SHA1 hash
+    const encodedSignature = oauthSignature.generate(
+        params.httpMethod,
+        params.url,
+        params.parameters,
+        params.consumerSecret,
+        params.tokenSecret,
+      ),
+      // generates a BASE64 encode HMAC-SHA1 hash
+      signature = oauthSignature.generate(
+        params.httpMethod,
+        params.url,
+        params.parameters,
+        params.consumerSecret,
+        params.tokenSecret,
+        {
+          encodeSignature: false,
+        },
+      );
+    return {
+      encodedSignature,
+      signature,
+    };
+  }
+
+
+
+  /**
+   * Generates nonce
+   * @returns {<object>} Returns nonce
+   */
+  generateNonce() {
+    const charset = '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._~';
+    const result = [];
+    getRandomValues(new Uint8Array(32)).forEach(c =>
+      result.push(charset[c % charset.length]));
+    return result.join('');
+  }
+
+  /**
+   * Send a POST request
+   * @param {string} resource - endpoint, e.g. `users/lookup`
+   * @param {object} body - POST parameters object.
+   *   Will be encoded appropriately (JSON or urlencoded) based on the resource
+   * @returns {Promise<object>} Promise resolving to the response from the Twitter API.
+   *   The `_header` property will be set to the Response headers (useful for checking rate limits)
+   */
+  post(resource, body, json = false) {
+    const endpointType = this.isEndpoint1OrEndpoint2(resource);
+    const endpoint1 = endpointType === 'v1';
+    const endpoint2 = endpointType === 'v2';
+
+    const { requestData, headers } = this._makeRequest(
+      'POST',
+      resource,
+      endpoint1 ? null : body, // don't sign JSON bodies; only parameters
+    );
+
+    const postHeaders = Object.assign({}, baseHeaders, headers);
+
+    if (endpoint1) {
+      body = JSON.stringify(body);
+    } else {
+      if (endpoint2) {
+        const nonce = this.generateNonce();
+        const timestamp = Math.floor((new Date()).getTime() / 1000);
+        const parameters = {
+          oauth_consumer_key : this.config.consumer_key,
+          oauth_token : this.config.access_token_key,
+          oauth_nonce : nonce,
+          oauth_timestamp : timestamp,
+          oauth_signature_method : this.client.signature_method,
+          oauth_version : this.client.version,
+          media_data : body['media_data'],
+        };
+        const signatureData = this.createOauthSignature('POST', requestData.url, parameters, this.config.consumer_secret, this.config.access_token_secret);
+        body['oauth_consumer_key'] = this.config.consumer_key;
+        body['oauth_nonce'] = nonce;
+        body['oauth_signature'] = signatureData.signature;
+        body['oauth_signature_method'] = this.client.signature_method;
+        body['oauth_timestamp'] = timestamp;
+        body['oauth_token'] = this.config.access_token_key;
+        body['oauth_version'] = this.client.version;
+      }
+
+      body = percentEncode(querystring.stringify(body));
+      postHeaders['Content-Type'] = json ? 'application/json' : 'application/x-www-form-urlencoded';
+
+      if (endpoint2) {
+        postHeaders['Content-Transfer-Encoding'] = 'base64';
+        delete postHeaders['Accept'];
+        delete postHeaders['Authorization'];
+      }
+    }
+
+    return Fetch(requestData.url, {
+      method: 'POST',
+      headers: postHeaders,
+      body,
+    })
+      .then(Twitter._handleResponse);
+  }
+
+  /**
+   * Send a POST request
+   * @param {string} resource - endpoint, e.g. `users/lookup`
+   * @param {object} body - POST parameters object.
+   *   Will be encoded appropriately (JSON or urlencoded) based on the resource
+   * @returns {Promise<object>} Promise resolving to the response from the Twitter API.
+   *   The `_header` property will be set to the Response headers (useful for checking rate limits)
+   */
+  postMedia(resource, body) {
+    const { requestData, headers } = this._makeRequest(
+      'POST',
+      resource,
+      body, // don't sign JSON bodies; only parameters
+    );
+
+    const postHeaders = Object.assign({}, baseHeaders, headers);
+    postHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+
+    return Fetch(requestData.url, {
+      method: 'POST',
+      headers: postHeaders,
+      body: percentEncode(querystring.stringify(body)),
+    })
+      .then(Twitter._handleResponse);
+  }
+
+  /**
+   * Send a PUT request
+   * @param {string} resource - endpoint e.g. `direct_messages/welcome_messages/update`
+   * @param {object} parameters - required or optional query parameters
+   * @param {object} body - PUT request body
+   * @returns {Promise<object>} Promise resolving to the response from the Twitter API.
+   */
+  put(resource, parameters, body) {
+    const { requestData, headers } = this._makeRequest(
+      'PUT',
+      resource,
+      parameters,
+    );
+
+    const putHeaders = Object.assign({}, baseHeaders, headers);
+    body = JSON.stringify(body);
+
+    return Fetch(requestData.url, {
+      method: 'PUT',
+      headers: putHeaders,
+      body,
+    })
+      .then(Twitter._handleResponse);
+  }
+
+  /**
+   * Send a DELETE request
+   * @param {string} resource - endpoint, e.g. `followers/ids`
+   * @param {object} [parameters] - optional parameters
+   * @returns {Promise<object>} Promise resolving to the response from the Twitter API.
+   *   The `_header` property will be set to the Response headers (useful for checking rate limits)
+   */
+  delete(resource, parameters) {
+    const { requestData, headers } = this._makeRequest(
+      'DELETE',
+      resource,
+      parameters,
+    );
+
+    const deleteHeaders = Object.assign({}, baseHeaders, headers);
+
+    return Fetch(
+      requestData.url,
+      {
+        method: 'DELETE',
+        headers: deleteHeaders
+      }
+    ).then(Twitter._handleResponse);
+  }
+}
+
+module.exports = Twitter;

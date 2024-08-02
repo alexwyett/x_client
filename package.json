@@ -1,0 +1,25 @@
+{
+  "name": "@cagen/x_client",
+  "version": "0.0.0",
+  "description": "X/Twitter HTTP Client",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test tests"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "cross-fetch": "^4.0.0",
+    "crypto": "^1.0.1",
+    "get-random-values": "^3.0.0",
+    "oauth-1.0a": "^2.2.6",
+    "oauth-signature": "^1.5.0",
+    "querystring": "^0.2.1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
