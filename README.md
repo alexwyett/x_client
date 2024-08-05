@@ -20,7 +20,7 @@ const client = Utils.Client.V1({
 You have access to the clients rest methods which can be used to interact with the api.
 
 ```
-  const profile = await client.get("account/verify_credentials")
+const profile = await client.get("account/verify_credentials")
 ```
 
 I have provided some helper methods which do some of the repetive code when performing api actions such as:
@@ -62,6 +62,7 @@ const clientv1 = Utils.Client.V1({
   token: process.env.TWITTER_TOKEN,
   refresh_token: process.env.TWITTER_REFRESH_TOKEN
 })
+
 const clientv2 = Utils.Client.V2({
   key: process.env.TWITTER_CLIENT_ID,
   secret: process.env.TWITTER_CLIENT_SECRET,
